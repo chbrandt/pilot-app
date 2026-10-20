@@ -7,3 +7,4 @@ charts/interlink/interlink-helm-chart
 .venv/
 .clinerules
 documentation/notes/
+site/
