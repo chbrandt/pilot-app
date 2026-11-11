@@ -1,81 +1,180 @@
 """
-tests/app/test_auth_app.py — GUI-layer tests for app.auth, focusing on the
-EGI Check-in OAuth authorization-code login (GA4).
+tests/app/test_auth_app.py — GUI-layer tests for app.auth.
 
-Patches:
-- ``app.auth.validate_token`` / ``app.auth.derive_namespace`` /
-  ``app.auth.check_group_access`` so ``_establish_session`` passes without
-  a real EGI Check-in token.
-- ``api.site_config.load_site_config`` to control the (fake) OIDC client
-  configuration and empty allowed_groups.
-- ``app.api_client.api_post`` (userspace ensure + saved seed).
-- ``app.auth.requests.post`` for the OAuth token-exchange call.
+The GUI never validates JWTs locally: login (token-paste and the EGI
+Check-in OAuth callback) is delegated to the Pilot API's public endpoints —
 
-No real network access is required.
+    POST /api/auth/verify           { access_token }
+    POST /api/auth/oidc/exchange    { code, code_verifier, redirect_uri }
+
+— and the OIDC client configuration (client_id / issuer only) comes from the
+public ``GET /api/site`` endpoint.  All HTTP calls are patched here; no real
+network access is required.
 """
 
 import base64
 import hashlib
-import os
-import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-FAKE_CLAIMS = {
-    "sub": "test-user-sub-12345678",
-    "iss": "https://aai.egi.eu/auth/realms/egi",
-    "exp": int(time.time()) + 3600,
-    "iat": int(time.time()),
+import requests
+
+from tests.conftest import FAKE_NAMESPACE, FAKE_SUB, make_fake_claims
+
+SITE_PATCH = "app.auth.api_get"      # app.auth's imported copy of api_get
+API_POST_PATCH = "app.auth.api_post"  # app.auth's imported copy of api_post
+
+FAKE_CLAIMS = make_fake_claims()
+VERIFY_OK = {"token": "fake-token", "claims": FAKE_CLAIMS, "namespace": FAKE_NAMESPACE}
+EXCHANGE_OK = {
+    "token": "fake-access-token-from-oauth",
+    "claims": FAKE_CLAIMS,
+    "namespace": FAKE_NAMESPACE,
 }
 
-FAKE_USER = {
-    "sub": "test-user-sub-12345678",
-    "namespace": "user-fcbc139581fea03d",
-    "exp": 9999999999,
-    "iss": "https://aai.egi.eu/auth/realms/egi",
-}
-
-OIDC_CONFIG = {
+SITE_WITH_OIDC = {
+    "hostname": "test.local",
+    "default_image": "ubuntu:22.04",
+    "wstunnel": {"port": 443, "local_port": 4000},
     "oidc": {
+        "enabled": True,
         "client_id": "hpc-pilot",
-        "client_secret": "",
+        "issuer": "https://aai.egi.eu/auth/realms/egi",
+    },
+}
+SITE_NO_OIDC = {
+    "hostname": "test.local",
+    "default_image": "ubuntu:22.04",
+    "wstunnel": {"port": 443, "local_port": 4000},
+    "oidc": {
+        "enabled": False,
+        "client_id": "",
         "issuer": "https://aai.egi.eu/auth/realms/egi",
     },
 }
 
-NO_OIDC_CONFIG = {}
 
-_TOKEN_EXCHANGE_RESPONSE = {
-    "access_token": "fake-access-token-from-oauth",
-    "token_type": "Bearer",
-    "expires_in": 3600,
-}
+def make_login_api_post(
+    verify_result=VERIFY_OK,
+    exchange_result=EXCHANGE_OK,
+    verify_error: Exception = None,
+    exchange_error: Exception = None,
+):
+    """Build an ``app.auth.api_post`` fake keyed on the endpoint path."""
+    calls = []
 
-LOAD_SITE_CONFIG_PATCH = "app.auth.load_site_config"
-API_POST_PATCH = "app.api_client.api_post"
-VALIDATE_TOKEN_PATCH = "app.auth.validate_token"
-GROUP_ACCESS_PATCH = "app.auth.check_group_access"
-REQUESTS_POST_PATCH = "app.auth.requests.post"
+    def fake(path, body=None, timeout=None):
+        calls.append((path, body))
+        if path == "/api/auth/verify":
+            if verify_error:
+                raise verify_error
+            return verify_result
+        if path == "/api/auth/oidc/exchange":
+            if exchange_error:
+                raise exchange_error
+            return exchange_result
+        if path == "/api/userspace/":
+            return {"created": False}
+        if path == "/api/saved/seed":
+            return {"seeded": True}
+        raise AssertionError(f"unexpected api_post path: {path}")
+
+    return fake, calls
 
 
-def _logged_in_client(client):
-    with client.session_transaction() as sess:
-        sess["namespace"] = FAKE_USER["namespace"]
-        sess["token"] = "fake-token"
-        sess["claims"] = FAKE_CLAIMS
-    return client
+def _http_error(status_code: int, message: str = "boom") -> requests.HTTPError:
+    response = MagicMock()
+    response.status_code = status_code
+    response.json.return_value = {"error": message}
+    return requests.HTTPError(response=response)
+
+
+# ---------------------------------------------------------------------------
+# POST /login  (token-paste login)
+# ---------------------------------------------------------------------------
+
+
+class TestTokenPasteLogin:
+    URL = "/login"
+
+    def test_missing_token_redirects_to_login(self, client):
+        resp = client.post(self.URL, data={"token": ""}, follow_redirects=False)
+        assert resp.status_code == 302
+        assert "/login" in resp.headers["Location"]
+
+    def test_success_establishes_session(self, client):
+        fake, calls = make_login_api_post()
+        with patch(API_POST_PATCH, side_effect=fake):
+            resp = client.post(
+                self.URL, data={"token": "a-real-looking-token"}, follow_redirects=False
+            )
+
+        assert resp.status_code == 302
+        assert resp.headers["Location"] == "/"
+        with client.session_transaction() as sess:
+            assert sess["token"] == "fake-token"
+            assert sess["claims"]["sub"] == FAKE_SUB
+            assert sess["namespace"] == FAKE_NAMESPACE
+        # verify + namespace bootstrap + saved-config seeding were called
+        paths = [c[0] for c in calls]
+        assert paths[0] == "/api/auth/verify"
+        assert "/api/userspace/" in paths
+        assert "/api/saved/seed" in paths
+
+    def test_invalid_token_flashes_and_redirects(self, client):
+        fake, _ = make_login_api_post(
+            verify_error=_http_error(401, "Token validation failed: bad signature")
+        )
+        with patch(API_POST_PATCH, side_effect=fake):
+            resp = client.post(
+                self.URL, data={"token": "bad-token"}, follow_redirects=False
+            )
+        assert resp.status_code == 302
+        assert "/login" in resp.headers["Location"]
+        # No session must have been established
+        with client.session_transaction() as sess:
+            assert "namespace" not in sess
+
+    def test_unreachable_api_flashes_and_redirects(self, client):
+        fake, _ = make_login_api_post(verify_error=requests.ConnectionError("down"))
+        with patch(API_POST_PATCH, side_effect=fake):
+            resp = client.post(
+                self.URL, data={"token": "whatever"}, follow_redirects=False
+            )
+        assert resp.status_code == 302
+        assert "/login" in resp.headers["Location"]
+
+    def test_incomplete_api_response_redirects(self, client):
+        fake, _ = make_login_api_post(verify_result={"token": "", "claims": {}, "namespace": ""})
+        with patch(API_POST_PATCH, side_effect=fake):
+            resp = client.post(
+                self.URL, data={"token": "whatever"}, follow_redirects=False
+            )
+        assert resp.status_code == 302
+        assert "/login" in resp.headers["Location"]
+
+
+# ---------------------------------------------------------------------------
+# GET /login/egi  (redirect to the EGI Check-in authorize endpoint)
+# ---------------------------------------------------------------------------
 
 
 class TestEgiLoginRedirect:
     URL = "/login/egi"
 
     def test_redirects_to_login_when_not_configured(self, client):
-        with patch(LOAD_SITE_CONFIG_PATCH, return_value=NO_OIDC_CONFIG):
+        with patch(SITE_PATCH, return_value=SITE_NO_OIDC):
+            resp = client.get(self.URL, follow_redirects=False)
+        assert resp.status_code == 302
+        assert "/login" in resp.headers["Location"]
+
+    def test_unreachable_api_disables_button(self, client):
+        with patch(SITE_PATCH, side_effect=requests.ConnectionError("down")):
             resp = client.get(self.URL, follow_redirects=False)
         assert resp.status_code == 302
         assert "/login" in resp.headers["Location"]
 
     def test_redirects_to_checkin_authorize_url(self, client):
-        with patch(LOAD_SITE_CONFIG_PATCH, return_value=OIDC_CONFIG):
+        with patch(SITE_PATCH, return_value=SITE_WITH_OIDC):
             resp = client.get(self.URL, follow_redirects=False)
 
         assert resp.status_code == 302
@@ -92,7 +191,7 @@ class TestEgiLoginRedirect:
             assert sess["oidc_state"]
 
     def test_pkce_challenge_matches_session_verifier(self, client):
-        with patch(LOAD_SITE_CONFIG_PATCH, return_value=OIDC_CONFIG):
+        with patch(SITE_PATCH, return_value=SITE_WITH_OIDC):
             resp = client.get(self.URL, follow_redirects=False)
 
         location = resp.headers["Location"]
@@ -108,248 +207,144 @@ class TestEgiLoginRedirect:
         assert f"code_challenge={expected}" in location
 
     def test_next_url_stored_in_session(self, client):
-        with patch(LOAD_SITE_CONFIG_PATCH, return_value=OIDC_CONFIG):
+        with patch(SITE_PATCH, return_value=SITE_WITH_OIDC):
             client.get(self.URL + "?next=/jobs", follow_redirects=False)
         with client.session_transaction() as sess:
             assert sess["oidc_next"] == "/jobs"
 
 
+# ---------------------------------------------------------------------------
+# GET /oauth/callback  (code exchange happens in the API)
+# ---------------------------------------------------------------------------
+
+
 class TestEgiCallback:
     URL = "/oauth/callback"
 
+    def _seed_session(self, client, state="expected-state", verifier="fake-code-verifier"):
+        with client.session_transaction() as sess:
+            sess["oidc_state"] = state
+            sess["oidc_next"] = ""
+            if verifier is not None:
+                sess["oidc_code_verifier"] = verifier
+
     def test_redirects_to_login_when_not_configured(self, client):
-        with patch(LOAD_SITE_CONFIG_PATCH, return_value=NO_OIDC_CONFIG):
+        with patch(SITE_PATCH, return_value=SITE_NO_OIDC):
             resp = client.get(self.URL, follow_redirects=False)
         assert resp.status_code == 302
         assert "/login" in resp.headers["Location"]
 
     def test_state_mismatch_redirects_to_login(self, client):
-        _logged_in_client(client)
-        with client.session_transaction() as sess:
-            sess["oidc_state"] = "expected-state"
-        with patch(LOAD_SITE_CONFIG_PATCH, return_value=OIDC_CONFIG):
+        self._seed_session(client)
+        fake, calls = make_login_api_post()
+        with (
+            patch(SITE_PATCH, return_value=SITE_WITH_OIDC),
+            patch(API_POST_PATCH, side_effect=fake),
+        ):
             resp = client.get(
                 self.URL + "?state=wrong-state&code=abc", follow_redirects=False
             )
         assert resp.status_code == 302
         assert "/login" in resp.headers["Location"]
+        assert calls == []  # no exchange attempt
 
     def test_missing_code_redirects_to_login(self, client):
-        _logged_in_client(client)
-        with client.session_transaction() as sess:
-            sess["oidc_state"] = "expected-state"
-        with patch(LOAD_SITE_CONFIG_PATCH, return_value=OIDC_CONFIG):
-            resp = client.get(
-                self.URL + "?state=expected-state", follow_redirects=False
-            )
+        self._seed_session(client)
+        with patch(SITE_PATCH, return_value=SITE_WITH_OIDC):
+            resp = client.get(self.URL + "?state=expected-state", follow_redirects=False)
         assert resp.status_code == 302
         assert "/login" in resp.headers["Location"]
 
-    def test_successful_login_establishes_session(self, client):
-        mock_response = type(
-            "R",
-            (),
-            {
-                "json": staticmethod(lambda: dict(_TOKEN_EXCHANGE_RESPONSE)),
-                "raise_for_status": staticmethod(lambda: None),
-            },
-        )()
+    def test_missing_pkce_verifier_redirects_to_login(self, client):
+        self._seed_session(client, verifier=None)
+        fake, calls = make_login_api_post()
         with (
-            patch(LOAD_SITE_CONFIG_PATCH, return_value=OIDC_CONFIG),
-            patch(VALIDATE_TOKEN_PATCH, return_value=dict(FAKE_CLAIMS)),
-            patch(GROUP_ACCESS_PATCH),  # no-op
-            patch(API_POST_PATCH, return_value={"created": False}),
-            patch(REQUESTS_POST_PATCH, return_value=mock_response) as mock_post,
+            patch(SITE_PATCH, return_value=SITE_WITH_OIDC),
+            patch(API_POST_PATCH, side_effect=fake),
         ):
-            with client.session_transaction() as sess:
-                sess["oidc_state"] = "expected-state"
-                sess["oidc_next"] = ""
-                sess["oidc_code_verifier"] = "fake-code-verifier"
-
             resp = client.get(
-                self.URL
-                + "?state=expected-state&code=auth-code"
-                + "&iss=https://aai.egi.eu/auth/realms/egi",
+                self.URL + "?state=expected-state&code=abc", follow_redirects=False
+            )
+        assert resp.status_code == 302
+        assert "/login" in resp.headers["Location"]
+        assert calls == []
+
+    def test_issuer_mismatch_redirects_to_login(self, client):
+        self._seed_session(client)
+        fake, calls = make_login_api_post()
+        with (
+            patch(SITE_PATCH, return_value=SITE_WITH_OIDC),
+            patch(API_POST_PATCH, side_effect=fake),
+        ):
+            resp = client.get(
+                self.URL + "?state=expected-state&code=abc&iss=https://evil.example.com",
+                follow_redirects=False,
+            )
+        assert resp.status_code == 302
+        assert "/login" in resp.headers["Location"]
+        assert calls == []  # IdP mix-up protection: no exchange attempt
+
+    def test_success_establishes_session(self, client):
+        self._seed_session(client)
+        fake, calls = make_login_api_post()
+        with (
+            patch(SITE_PATCH, return_value=SITE_WITH_OIDC),
+            patch(API_POST_PATCH, side_effect=fake),
+        ):
+            resp = client.get(
+                self.URL + "?state=expected-state&code=auth-code"
+                "&iss=https://aai.egi.eu/auth/realms/egi",
                 follow_redirects=False,
             )
 
         assert resp.status_code == 302
         assert resp.headers["Location"] == "/"
-        # The exchanged access token must be stored in the session
+        # The API-returned access token must be stored in the session
         with client.session_transaction() as sess:
             assert sess["token"] == "fake-access-token-from-oauth"
-            assert sess["namespace"] == FAKE_USER["namespace"]
-        # The token exchange must hit the Check-in token endpoint
-        url = mock_post.call_args[0][0]
-        assert "protocol/openid-connect/token" in url
-        # ... and prove possession of the PKCE verifier (RFC 7636)
-        sent = mock_post.call_args[1]["data"]
-        assert sent["grant_type"] == "authorization_code"
-        assert sent["code_verifier"] == "fake-code-verifier"
+            assert sess["claims"]["sub"] == FAKE_SUB
+            assert sess["namespace"] == FAKE_NAMESPACE
 
-    def test_token_exchange_failure_redirects_to_login(self, client):
-        bad_response = type(
-            "R",
-            (),
-            {
-                "raise_for_status": staticmethod(
-                    lambda: (_ for _ in ()).throw(RuntimeError("IdP down"))
-                )
-            },
-        )()
+        exchange = [c for c in calls if c[0] == "/api/auth/oidc/exchange"]
+        assert len(exchange) == 1
+        body = exchange[0][1]
+        # PKCE possession must be proven to the API (and through it, the IdP)
+        assert body["code"] == "auth-code"
+        assert body["code_verifier"] == "fake-code-verifier"
+        assert body["redirect_uri"].endswith("/oauth/callback")
+
+    def test_exchange_failure_redirects_to_login(self, client):
+        self._seed_session(client)
+        fake, _ = make_login_api_post(exchange_error=_http_error(401, "invalid_grant"))
         with (
-            patch(LOAD_SITE_CONFIG_PATCH, return_value=OIDC_CONFIG),
-            patch(REQUESTS_POST_PATCH, return_value=bad_response),
+            patch(SITE_PATCH, return_value=SITE_WITH_OIDC),
+            patch(API_POST_PATCH, side_effect=fake),
         ):
-            with client.session_transaction() as sess:
-                sess["oidc_state"] = "expected-state"
-                sess["oidc_code_verifier"] = "fake-code-verifier"
             resp = client.get(
                 self.URL + "?state=expected-state&code=abc", follow_redirects=False
             )
         assert resp.status_code == 302
         assert "/login" in resp.headers["Location"]
 
-    def test_missing_pkce_verifier_redirects_to_login(self, client):
-        with (
-            patch(LOAD_SITE_CONFIG_PATCH, return_value=OIDC_CONFIG),
-            patch(REQUESTS_POST_PATCH) as mock_post,
-        ):
-            with client.session_transaction() as sess:
-                sess["oidc_state"] = "expected-state"
-            resp = client.get(
-                self.URL + "?state=expected-state&code=abc", follow_redirects=False
-            )
-        assert resp.status_code == 302
-        assert "/login" in resp.headers["Location"]
-        mock_post.assert_not_called()
 
-    def test_issuer_mismatch_redirects_to_login(self, client):
-        with (
-            patch(LOAD_SITE_CONFIG_PATCH, return_value=OIDC_CONFIG),
-            patch(REQUESTS_POST_PATCH) as mock_post,
-        ):
-            with client.session_transaction() as sess:
-                sess["oidc_state"] = "expected-state"
-                sess["oidc_code_verifier"] = "fake-code-verifier"
-            resp = client.get(
-                self.URL
-                + "?state=expected-state&code=abc"
-                + "&iss=https://evil.example.com",
-                follow_redirects=False,
-            )
-        assert resp.status_code == 302
-        assert "/login" in resp.headers["Location"]
-        mock_post.assert_not_called()
-
-
-class TestClientSecretSource:
-    """
-    Precedence between ``site.oidc.client_secret`` (YAML) and the
-    ``PILOT_OIDC_CLIENT_SECRET`` environment variable.
-    """
-
-    URL = "/oauth/callback"
-    YAML_SECRET_CONFIG = {
-        "oidc": {**OIDC_CONFIG["oidc"], "client_secret": "yaml-secret"},
-    }
-
-    def _sent_client_secret(self, client, config, env):
-        """
-        Run the OAuth callback against *config* with env mapping *env*
-        applied (``None`` = variable unset) and return the
-        ``client_secret`` posted to the IdP token endpoint.
-        """
-        # json() -> {} means no access_token: the handler flashes and
-        # redirects, but the token-exchange POST has already been recorded.
-        mock_response = type(
-            "R",
-            (),
-            {
-                "json": staticmethod(lambda: {}),
-                "raise_for_status": staticmethod(lambda: None),
-            },
-        )()
-        with (
-            patch(LOAD_SITE_CONFIG_PATCH, return_value=config),
-            patch(REQUESTS_POST_PATCH, return_value=mock_response) as mock_post,
-            patch.dict(os.environ, {}),
-        ):
-            if env is None:
-                os.environ.pop("PILOT_OIDC_CLIENT_SECRET", None)
-            else:
-                os.environ.update(env)
-            with client.session_transaction() as sess:
-                sess["oidc_state"] = "expected-state"
-                sess["oidc_code_verifier"] = "fake-code-verifier"
-            client.get(
-                self.URL + "?state=expected-state&code=abc",
-                follow_redirects=False,
-            )
-        return mock_post.call_args[1]["data"]["client_secret"]
-
-    def test_env_var_overrides_yaml_secret(self, client):
-        secret = self._sent_client_secret(
-            client,
-            self.YAML_SECRET_CONFIG,
-            {"PILOT_OIDC_CLIENT_SECRET": "env-secret"},
-        )
-        assert secret == "env-secret"
-
-    def test_yaml_secret_used_when_env_unset(self, client):
-        secret = self._sent_client_secret(client, self.YAML_SECRET_CONFIG, None)
-        assert secret == "yaml-secret"
-
-    def test_yaml_secret_used_when_env_empty(self, client):
-        secret = self._sent_client_secret(
-            client, self.YAML_SECRET_CONFIG, {"PILOT_OIDC_CLIENT_SECRET": ""}
-        )
-        assert secret == "yaml-secret"
+# ---------------------------------------------------------------------------
+# GET /login  (button visibility, driven by GET /api/site)
+# ---------------------------------------------------------------------------
 
 
 class TestLoginPageOidcButton:
     URL = "/login"
 
     def test_button_hidden_when_oidc_not_configured(self, client):
-        with patch(LOAD_SITE_CONFIG_PATCH, return_value=NO_OIDC_CONFIG):
+        with patch(SITE_PATCH, return_value=SITE_NO_OIDC):
             resp = client.get(self.URL)
         assert resp.status_code == 200
-        html = resp.data.decode()
-        assert "Log in with EGI Check-in" not in html
+        assert "Log in with EGI Check-in" not in resp.data.decode()
 
     def test_button_shown_when_oidc_configured(self, client):
-        with patch(LOAD_SITE_CONFIG_PATCH, return_value=OIDC_CONFIG):
+        with patch(SITE_PATCH, return_value=SITE_WITH_OIDC):
             resp = client.get(self.URL)
         assert resp.status_code == 200
         html = resp.data.decode()
         assert "Log in with EGI Check-in" in html
         assert "/login/egi" in html
-
-
-class TestAudienceForwarding:
-    """site.oidc.audience is forwarded to validate_token (GUI login)."""
-
-    def _post_login(self, client, config):
-        with (
-            patch(LOAD_SITE_CONFIG_PATCH, return_value=config),
-            patch(
-                VALIDATE_TOKEN_PATCH, return_value=dict(FAKE_CLAIMS)
-            ) as mock_validate,
-            patch(GROUP_ACCESS_PATCH),
-            patch(API_POST_PATCH, return_value={"created": False}),
-        ):
-            resp = client.post(
-                "/login", data={"token": "fake-token"}, follow_redirects=False
-            )
-        assert resp.status_code == 302
-        return mock_validate
-
-    def test_login_passes_configured_audience(self, client):
-        config = {"oidc": {**OIDC_CONFIG["oidc"], "audience": "hpc-pilot"}}
-        mock_validate = self._post_login(client, config)
-        assert mock_validate.call_args[1]["audience"] == "hpc-pilot"
-
-    def test_login_sends_no_audience_by_default(self, client):
-        mock_validate = self._post_login(client, OIDC_CONFIG)
-        assert mock_validate.call_args[1]["audience"] is None
-

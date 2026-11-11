@@ -1,9 +1,9 @@
 """
-app/api_client.py — Thin HTTP client for calling the REST API from the web GUI.
+app/api_client.py — Thin HTTP client for calling the Pilot API from the GUI.
 
-The webapp uses this module instead of importing ``lib/`` directly, so that
-the two layers can be split into separate processes in the future with no
-further changes to ``app/``.
+The GUI (pilot-app) is a pure HTTP client of the API service (pilot-api):
+it uses this module instead of importing any backend code, so every
+operation — including login verification — goes over HTTP.
 
 Configuration
 -------------
@@ -36,8 +36,8 @@ from flask import session
 
 logger = logging.getLogger(__name__)
 
-# Base URL of the REST API — same origin by default (single-process mode).
-# Set API_BASE_URL to point at a remote API server when running split.
+# Base URL of the Pilot API service (pilot-api). In-cluster the deploy
+# chart sets this to the api Service; locally it defaults to localhost:5000.
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:5000")
 
 # Read timeouts (seconds) for calls from the GUI layer to the REST API.

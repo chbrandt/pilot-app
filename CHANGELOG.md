@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CR1 — repository split**: the HPC Pilot monorepo was split into three
+  repositories: **pilot-app** (this repo — the web GUI), **pilot-api** (the
+  REST API server) and **pilot-deploy** (Helm charts + docker recipes).
+  `manager/app` became the top-level `app/` package with its own
+  `main.py`.
+- **Pure HTTP client**: all `lib.*` and `api.*` imports were removed from
+  the GUI. Every backend operation goes through `API_BASE_URL`, including:
+  - login — `POST /api/auth/verify` (token-paste) and
+    `POST /api/auth/oidc/exchange` (EGI Check-in button);
+  - HPC node list — `GET /api/hpc/nodes`;
+  - site settings/display — `GET /api/site`;
+  - saved configurations — `GET/POST /api/saved`, `GET/DELETE /api/saved/{id}`.
+- The OIDC client secret no longer reaches the GUI — the code→token
+  exchange happens inside the API.
+
 ## [v0.4.1] - 2026-10-13
 
 ### Added

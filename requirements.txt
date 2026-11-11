@@ -1,0 +1,14 @@
+# Flask web framework
+flask>=3.0.0
+
+# HTTP client — the GUI talks to the Pilot API exclusively over HTTP
+requests>=2.31.0
+
+# Jinja2 template engine (bundled with Flask; pinned explicitly)
+jinja2>=3.1.0
+
+# Utilities
+python-dotenv>=1.0.0
+
+# Run tests
+pytest>=7.4.0

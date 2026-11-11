@@ -7,13 +7,15 @@ Handles:
 - Session helpers (get_session_user)
 - require_login route decorator
 
-The pure JWT validation logic lives in lib/token_auth.py.
+The GUI is a pure HTTP client: token validation, group-access checks and
+the OIDC code→token exchange all happen in the Pilot API
+(``POST /api/auth/verify`` and ``POST /api/auth/oidc/exchange``); the OIDC
+client secret never reaches this service.
 """
 
 import base64
 import hashlib
 import logging
-import os
 import secrets
 import time
 from functools import wraps
@@ -23,13 +25,7 @@ from urllib.parse import urlencode
 import requests
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
-from api.site_config import load_site_config
-from lib.token_auth import (
-    check_group_access,
-    derive_namespace,
-    fetch_userinfo,
-    validate_token,
-)
+from app.api_client import api_get, api_post
 
 logger = logging.getLogger(__name__)
 
@@ -97,76 +93,75 @@ def require_login(f):
 # ── Routes ────────────────────────────────────────────────────────────
 
 
+def _api_error(exc: requests.HTTPError) -> str:
+    """Extract a human-readable message from an HTTPError response."""
+    try:
+        return exc.response.json().get("error", str(exc))
+    except Exception:
+        return str(exc)
+
+
 def _oidc_config() -> dict:
     """
-    Return the OIDC client configuration from the ``site.oidc`` section of
-    the unified config, or an empty dict when not configured.
+    Return the OIDC client configuration as published by the API's public
+    ``GET /api/site`` endpoint, or an empty dict when unavailable.
 
-    Keys: ``client_id``, ``client_secret`` (optional), ``issuer``
-    (optional, defaults to the EGI Check-in production realm), and
-    ``redirect_uri`` (optional explicit override).
-
-    The ``PILOT_OIDC_CLIENT_SECRET`` environment variable, when set to a
-    non-empty value, overrides ``client_secret`` so the secret can be kept
-    out of the configuration file (same pattern as ``FLASK_SECRET_KEY``).
+    Keys: ``client_id`` and ``issuer`` (display-safe only).  The OIDC
+    client secret never reaches the GUI: the code→token exchange happens
+    inside the API (``POST /api/auth/oidc/exchange``).
     """
-    oidc = load_site_config().get("oidc")
-    if not isinstance(oidc, dict):
+    try:
+        return api_get("/api/site").get("oidc") or {}
+    except Exception as exc:
+        logger.warning("Could not fetch the OIDC configuration: %s", exc)
         return {}
-    env_secret = os.environ.get("PILOT_OIDC_CLIENT_SECRET")
-    if env_secret:
-        return {**oidc, "client_secret": env_secret}
-    return oidc
 
 
 def _establish_session(token: str, next_url: str):
     """
-    Validate *token*, set up the Flask session and bootstrap the user's
-    namespace / default configs.
-
-    Shared by the token-paste login (POST /login) and the EGI Check-in
-    OAuth callback (GET /oauth/callback).
+    Verify *token* through the Pilot API (``POST /api/auth/verify``) and
+    set up the Flask session.
 
     Returns a redirect response on success, or ``None`` on failure (a
     flash message describing the error has already been queued).
     """
-    from app.api_client import api_post
-
-    # Validate the token (JWKS signature + expiry + trusted issuer; the
-    # 'aud' claim only when site.oidc.audience is configured)
-    audience = _oidc_config().get("audience") or None
     try:
-        claims = validate_token(token, audience=audience)
-        logger.debug(f"Token claims: {claims}")
-    except ValueError as exc:
-        flash(f"Token validation failed: {exc}", "error")
+        result = api_post("/api/auth/verify", {"access_token": token})
+    except requests.HTTPError as exc:
+        flash(f"Login failed: {_api_error(exc)}", "error")
+        return None
+    except Exception as exc:
+        logger.error("Login verification failed: %s", exc)
+        flash(
+            "Login failed: could not reach the API (is it running?).",
+            "error",
+        )
         return None
 
-    # Group-access check (no-op when allowed_groups is empty)
-    allowed_groups = load_site_config().get("allowed_groups") or []
-    if allowed_groups:
-        # Entitlements are not in the JWT — fetch from the UserInfo endpoint
-        try:
-            userinfo = fetch_userinfo(token, claims["iss"])
-            claims = {**claims, **userinfo}
-        except ValueError as exc:
-            logger.warning("UserInfo fetch failed: %s", exc)
-            flash(
-                f"Could not verify group membership "
-                f"(UserInfo endpoint unavailable): {exc}",
-                "error",
-            )
-            return None
-    try:
-        check_group_access(claims, allowed_groups)
-    except ValueError as exc:
-        logger.warning("Web login group access denied: %s", exc)
-        flash(str(exc), "error")
+    return _finalize_session(
+        token=result.get("token", token),
+        claims=result.get("claims") or {},
+        namespace=result.get("namespace", ""),
+        next_url=next_url,
+    )
+
+
+def _finalize_session(
+    token: str, claims: dict, namespace: str, next_url: Optional[str]
+):
+    """
+    Store API-validated credentials in the Flask session and bootstrap
+    the user's namespace / default configs.
+
+    Returns a redirect response on success, or ``None`` when the API
+    response was incomplete.
+    """
+    if not token or not namespace or "sub" not in claims:
+        logger.error("Incomplete login response from the API.")
+        flash("Login failed: incomplete response from the API.", "error")
         return None
 
-    # Derive the user's personal namespace from the sub claim
     sub = claims["sub"]
-    namespace = derive_namespace(sub)
 
     # Store validated credentials in the session
     session.clear()
@@ -296,14 +291,15 @@ def egi_login():
 @auth_bp.route("/oauth/callback")
 def egi_callback():
     """
-    Exchange the authorization code for tokens and establish the session.
+    Exchange the authorization code for a session via the Pilot API.
 
     Verifies the ``state`` parameter against the one stored by
     :func:`egi_login` (CSRF protection) and, when present, the RFC 9207
     ``iss`` parameter against the configured issuer (IdP mix-up
-    protection), then POSTs the code and the PKCE ``code_verifier`` to the
-    IdP token endpoint and feeds the resulting access token through the
-    same validation and session logic as the token-paste login.
+    protection), then sends the code and the PKCE ``code_verifier`` to the
+    API's ``POST /api/auth/oidc/exchange`` — the API performs the token
+    exchange with the IdP (the client secret stays server-side) — and
+    establishes the session with the API-validated credentials.
     """
     oidc = _oidc_config()
     client_id = oidc.get("client_id")
@@ -345,38 +341,36 @@ def egi_callback():
         flash("Login failed: login session expired. Please try again.", "error")
         return redirect(url_for("auth.login"))
 
-    # ── Exchange the code for tokens ──────────────────────────────────
+    # ── Exchange the code for tokens (server-side, in the API) ─────────
     redirect_uri = oidc.get("redirect_uri") or (
         request.host_url.rstrip("/") + url_for("auth.egi_callback")
     )
-    token_url = f"{issuer}/protocol/openid-connect/token"
-
-    data = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "client_id": client_id,
-        "code_verifier": code_verifier,
-    }
-    client_secret = oidc.get("client_secret")
-    if client_secret:
-        data["client_secret"] = client_secret
 
     try:
-        resp = requests.post(token_url, data=data, timeout=30)
-        resp.raise_for_status()
-        tokens = resp.json()
+        result = api_post(
+            "/api/auth/oidc/exchange",
+            {
+                "code": code,
+                "code_verifier": code_verifier,
+                "redirect_uri": redirect_uri,
+            },
+        )
+    except requests.HTTPError as exc:
+        logger.error("OAuth exchange failed: %s", _api_error(exc))
+        flash(f"Login failed: {_api_error(exc)}", "error")
+        return redirect(url_for("auth.login"))
     except Exception as exc:
-        logger.error("OAuth token exchange failed: %s", exc)
+        logger.error("OAuth exchange failed: %s", exc)
         flash("Login failed: could not exchange the authorization code.", "error")
         return redirect(url_for("auth.login"))
 
-    access_token = tokens.get("access_token")
-    if not access_token:
-        flash("Login failed: no access token in the IdP response.", "error")
-        return redirect(url_for("auth.login"))
-
-    result = _establish_session(access_token, next_url)
+    # Establish the session with the API-validated credentials
+    result = _finalize_session(
+        token=result.get("token", ""),
+        claims=result.get("claims") or {},
+        namespace=result.get("namespace", ""),
+        next_url=next_url,
+    )
     return result if result is not None else redirect(url_for("auth.login"))
 
 

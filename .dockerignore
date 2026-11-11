@@ -1,0 +1,4 @@
+.[a-zA-Z]*
+tests
+tmp
+**/__pycache__

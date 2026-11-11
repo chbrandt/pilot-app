@@ -1,9 +1,9 @@
 """
 app/hpc.py — Web GUI routes for node management (HPC + InterLink).
 
-All backend operations are performed via the REST API (app.api_client),
-so this module has no direct dependency on lib/ except for listing the
-available HPC nodes (from config files) and plugin metadata.
+All backend operations are performed via the REST API (app.api_client):
+listing HPC nodes, their InterLink deployment state, and the site-level
+wstunnel settings all come from the API.
 
 Routes (all under /hpc prefix, plus the merged /nodes page)
 -------
@@ -26,8 +26,6 @@ from flask import Blueprint, flash, redirect, render_template, request, session,
 
 from app.auth import require_login
 from app.api_client import LONG_TIMEOUT, api_delete, api_get, api_post
-from api.site_config import load_site_config
-from lib.hpc_config import list_hpc_nodes
 
 logger = logging.getLogger(__name__)
 
@@ -45,24 +43,31 @@ def _api_error(exc: requests.HTTPError) -> str:
         return str(exc)
 
 
+def _site_meta() -> dict:
+    """Fetch display-safe site metadata from the API (GET /api/site)."""
+    try:
+        return api_get("/api/site")
+    except Exception as exc:
+        logger.warning("Could not fetch site metadata: %s", exc)
+        return {}
+
+
 def _wstunnel_config(namespace: str) -> dict:
     """
-    Build wstunnel defaults from the user's namespace and the site config.
+    Build wstunnel defaults from the user's namespace and the site
+    metadata published by the API (``GET /api/site``).
 
-    The server hostname is ``site_config.hostname`` (shared, path-prefix
-    routing); the secret/path-prefix is the user's full namespace; the ports
-    come from ``site_config.wstunnel``.
+    The server hostname is the shared site hostname (path-prefix routing);
+    the secret/path-prefix is the user's full namespace; the ports come
+    from ``site.wstunnel``.
     """
-    site_cfg = load_site_config()
-    hostname = site_cfg.get("hostname", "dev.local")
-    wstunnel_port = site_cfg["wstunnel"]["port"]
-    wstunnel_server = hostname
-    wstunnel_local_port = site_cfg["wstunnel"]["local_port"]
+    site_cfg = _site_meta()
+    wst = site_cfg.get("wstunnel") or {}
     return {
-        "wstunnel_server": wstunnel_server,
-        "wstunnel_port": wstunnel_port,
+        "wstunnel_server": site_cfg.get("hostname", "dev.local"),
+        "wstunnel_port": wst.get("port", 443),
         "wstunnel_secret": namespace,
-        "wstunnel_local_port": wstunnel_local_port,
+        "wstunnel_local_port": wst.get("local_port", 4000),
     }
 
 
@@ -82,10 +87,15 @@ def manage_nodes():
     """
     namespace = session.get("namespace", "")
     defaults = _wstunnel_config(namespace)
-    hpc_nodes = list_hpc_nodes()
 
     nodes = []
     errors = []
+    try:
+        hpc_nodes = api_get("/api/hpc/nodes").get("nodes", [])
+    except Exception as exc:
+        logger.error("Could not list HPC nodes: %s", exc)
+        errors.append(f"HPC nodes: {exc}")
+        hpc_nodes = []
     for node in hpc_nodes:
         hpc_name = node["name"]
         entry = {

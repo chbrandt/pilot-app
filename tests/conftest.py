@@ -1,9 +1,15 @@
 """
-conftest.py — shared pytest fixtures for HPC Pilot tests.
+conftest.py — shared pytest fixtures for Pilot App (GUI) tests.
+
+The GUI is a pure HTTP client of the Pilot API (pilot-api): the ``app``
+fixture therefore needs no Kubernetes/Kubeconfig stubbing at all — only a
+testing-mode Flask application and a way to inject a fake logged-in
+session (mirroring what ``app.auth._finalize_session`` writes after a
+successful API login).
 """
 
+import hashlib
 import time
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,23 +19,14 @@ import pytest
 
 
 @pytest.fixture()
-def app(tmp_path):
-    """
-    Create the Flask application in testing mode.
+def app():
+    """Create the GUI Flask application in testing mode."""
+    from main import create_app
 
-    Patches out the Kubernetes config loading so no real kubeconfig is needed,
-    and patches saved_deployments._DATA_DIR to use a temporary directory.
-    """
-    with (
-        patch("kubernetes.config.load_kube_config"),
-        patch("lib.saved_deployments._DATA_DIR", str(tmp_path / "data")),
-    ):
-        from main import create_app
-
-        flask_app = create_app()
-        flask_app.config["TESTING"] = True
-        flask_app.config["SECRET_KEY"] = "test-secret"
-        yield flask_app
+    flask_app = create_app()
+    flask_app.config["TESTING"] = True
+    flask_app.config["SECRET_KEY"] = "test-secret"
+    yield flask_app
 
 
 @pytest.fixture()
@@ -42,13 +39,12 @@ def client(app):
 # Auth helpers
 # ---------------------------------------------------------------------------
 
-# Fake claims returned by validate_token when a test bypasses real validation.
 FAKE_SUB = "test-user-sub-12345678"
-FAKE_NAMESPACE = "user-" + "a" * 16  # placeholder; derived in fixture below
+FAKE_NAMESPACE = "user-" + hashlib.sha256(FAKE_SUB.encode()).hexdigest()[:16]
 
 
 def make_fake_claims(sub: str = FAKE_SUB, exp_offset: int = 3600) -> dict:
-    """Return a minimal fake JWT claims dict."""
+    """Return a minimal fake JWT claims dict (as validated by the API)."""
     return {
         "sub": sub,
         "iss": "https://aai.egi.eu/auth/realms/egi",
@@ -57,25 +53,27 @@ def make_fake_claims(sub: str = FAKE_SUB, exp_offset: int = 3600) -> dict:
     }
 
 
+def login_client(client, sub: str = FAKE_SUB) -> str:
+    """
+    Inject a fake logged-in session so ``require_login`` passes.
+
+    Returns the fake namespace stored in the session.  The session
+    mirrors exactly what ``app.auth._finalize_session`` writes after a
+    successful API login: ``token``, ``claims`` and ``namespace``.
+    """
+    namespace = "user-" + hashlib.sha256(sub.encode()).hexdigest()[:16]
+    with client.session_transaction() as sess:
+        sess["token"] = "fake-test-token"
+        sess["claims"] = make_fake_claims(sub=sub)
+        sess["namespace"] = namespace
+    return namespace
+
+
 @pytest.fixture()
-def auth_headers(app):
+def auth_headers(app, client):
     """
-    Return HTTP headers carrying a fake Bearer token.
-
-    Patches both ``validate_token`` and ``derive_namespace`` inside the
-    ``api.auth`` module so every protected route receives valid claims without
-    a real EGI Check-in token.
+    Log the test client in and yield ``(headers, namespace)`` — the same
+    tuple the old monorepo's test-suite yielded, for easy porting.
     """
-    import hashlib
-
-    fake_sub = FAKE_SUB
-    fake_ns = "user-" + hashlib.sha256(fake_sub.encode()).hexdigest()[:16]
-    fake_claims = make_fake_claims(sub=fake_sub)
-
-    with (
-        patch("api.auth.validate_token", return_value=fake_claims),
-        patch("api.auth.derive_namespace", return_value=fake_ns),
-        # Bypass group-access check: tests cover API logic, not authn/authz rules
-        patch("api.auth.load_site_config", return_value={}),
-    ):
-        yield {"Authorization": "Bearer fake-test-token"}, fake_ns
+    namespace = login_client(client)
+    yield {"Authorization": "Bearer fake-test-token"}, namespace

@@ -1,9 +1,8 @@
 """
 app/k8s.py — Web GUI routes for Kubernetes job management.
 
-All backend operations are performed via the REST API (app.api_client),
-so this module has no direct dependency on lib/ except for listing the
-configured HPC nodes on the home page.
+All backend operations are performed via the REST API (app.api_client);
+the GUI holds no Kubernetes or Helm logic of its own.
 
 Routes
 ------
@@ -26,7 +25,6 @@ from flask import Blueprint, flash, redirect, render_template, request, session,
 
 from app.auth import require_login
 from app.api_client import api_delete, api_get, api_post
-from lib.saved_deployments import list_configs, save_config
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +74,15 @@ def home():
         logger.error("Could not list jobs for home page: %s", exc)
 
     # ── InterLink / HPC nodes ─────────────────────────────────────────
-    from lib.hpc_config import list_hpc_nodes
+    try:
+        hpc_nodes = api_get("/api/hpc/nodes").get("nodes", [])
+    except Exception as exc:
+        logger.error("Could not list HPC nodes for home page: %s", exc)
+        errors.append(f"HPC nodes: {exc}")
+        hpc_nodes = []
 
     nodes = []
-    for node in list_hpc_nodes():
+    for node in hpc_nodes:
         hpc_name = node["name"]
         entry = {**node, "interlink_deployed": False}
         try:
@@ -106,13 +109,23 @@ def home():
 @require_login
 def index():
     """Job submission form."""
-    from api.site_config import load_site_config
-
     namespace = session.get("namespace", "")
-    saved = list_configs(namespace, kind="container") if namespace else []
+
+    # Saved container presets come from the API (filtered server-side)
+    saved = []
+    if namespace:
+        try:
+            saved = api_get("/api/saved", params={"kind": "container"})
+        except Exception as exc:
+            logger.warning("Could not list saved configs: %s", exc)
 
     # Default container image shown as the form's placeholder (GA7)
-    default_image = load_site_config().get("default_image", "ubuntu:22.04")
+    default_image = "ubuntu:22.04"
+    try:
+        site_meta = api_get("/api/site")
+        default_image = site_meta.get("default_image", "ubuntu:22.04")
+    except Exception as exc:
+        logger.warning("Could not fetch site metadata: %s", exc)
 
     # Fetch available InterLink virtual-kubelet nodes for the dropdown
     interlink_nodes = []
@@ -293,7 +306,7 @@ def save_job(namespace, name):
 
     try:
         spec = api_get(f"/api/jobs/{name}")
-        save_config(namespace=namespace, kind="container", config=spec)
+        api_post("/api/saved", {"kind": "container", "config": spec})
         flash(
             f"Configuration for '{name}' saved. Load it from the Submit page.",
             "success",
