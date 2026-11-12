@@ -15,19 +15,11 @@ import requests
 from flask import Blueprint, flash, redirect, url_for
 
 from app.auth import require_login
-from app.api_client import api_delete, api_get
+from app.api_client import api_delete, api_error, api_get
 
 logger = logging.getLogger(__name__)
 
 saved_bp = Blueprint("app_saved", __name__)
-
-
-def _api_error(exc: requests.HTTPError) -> str:
-    """Extract a human-readable message from an HTTPError response."""
-    try:
-        return exc.response.json().get("error", str(exc))
-    except Exception:
-        return str(exc)
 
 
 @saved_bp.route("/saved/<config_id>/delete", methods=["POST"])
@@ -42,7 +34,7 @@ def delete_saved_config(config_id):
         if exc.response is not None and exc.response.status_code == 404:
             flash("Saved configuration not found.", "error")
             return redirect(url_for("app_k8s.index"))
-        flash(f"Could not read saved configuration: {_api_error(exc)}", "error")
+        flash(f"Could not read saved configuration: {api_error(exc)}", "error")
         return redirect(url_for("app_k8s.index"))
     except Exception as exc:
         logger.error("Reading saved configuration failed: %s", exc)
@@ -55,7 +47,7 @@ def delete_saved_config(config_id):
         api_delete(f"/api/saved/{config_id}")
         flash(f"Saved configuration '{label}' removed.", "success")
     except requests.HTTPError as exc:
-        flash(f"Could not remove saved configuration: {_api_error(exc)}", "error")
+        flash(f"Could not remove saved configuration: {api_error(exc)}", "error")
     except Exception as exc:
         logger.error("Removing saved configuration failed: %s", exc)
         flash(f"Could not remove saved configuration: {exc}", "error")

@@ -1,0 +1,382 @@
+# Web UI Routes
+
+The **web GUI layer** (the `app/` package in this repository) renders HTML
+pages in the browser. It is a thin client over the
+[Pilot API](https://github.com/chbrandt/pilot-api/blob/main/docs/rest_api.md):
+every backend operation — including login verification — goes through
+`app/api_client.py`, which forwards the session's Bearer token to the API's
+`/api` endpoints over HTTP (`API_BASE_URL`).
+
+All routes (except `/login` and `/logout`) are protected by the
+`require_login` decorator. Unauthenticated HTML requests are redirected to
+`/login`; AJAX/JSON requests get HTTP 401 with a JSON body.
+
+---
+
+## Authentication Routes (`app/auth.py`)
+
+### `GET /login`
+
+Render the login page: the token-paste form and, when the Pilot API
+publishes an OIDC client (`GET /api/site` → `oidc.client_id`), the
+**🎫 Log in with EGI Check-in** button (OAuth
+authorization-code flow — see
+[Authentication](https://github.com/chbrandt/pilot-api/blob/main/docs/authentication.md#egi-check-in-oauth-login-browser-flow)).
+
+**Query parameters:**
+
+| Parameter | Description |
+|---|---|
+| `reason=expired` | Show "session expired" warning banner |
+| `refresh=1` | Show "update your token" banner instead of the normal title |
+| `next=<url>` | URL to redirect to after successful login (also forwarded to the EGI Check-in button) |
+
+**Response:** `login.html`
+
+---
+
+### `POST /login`
+
+Validate the submitted EGI Check-in access token and start a session.
+
+On success the manager also:
+
+1. Derives the user's namespace from the `sub` claim.
+2. Calls `POST /api/userspace/` to create it (if missing).
+3. Calls `POST /api/saved/seed` to seed the default chart presets.
+
+**Form fields:**
+
+| Field | Required | Description |
+|---|---|---|
+| `token` | ✓ | Raw EGI Check-in JWT access token |
+| `next` | | URL to redirect to after login |
+
+**Success:** Redirect to `next` (or `/`)
+**Failure:** Flash error message, redirect to `GET /login`
+
+---
+
+### `GET /login/egi`
+
+Start the EGI Check-in **OAuth 2.0 authorization-code flow** (GA4): redirect
+the user's browser to the Check-in (Keycloak) authorization endpoint with a
+random CSRF `state` and a PKCE `code_challenge` (RFC 7636, S256), both
+stored in the session.
+
+Requires an OIDC client registered in EGI Check-in with
+`<site.hostname>/oauth/callback` as an allowed redirect URI; configure
+it under `site.oidc` in `pilot_config.yaml`:
+
+```yaml
+site:
+  oidc:
+    client_id: hpc-pilot
+    client_secret: ""     # confidential clients — or set PILOT_OIDC_CLIENT_SECRET
+    issuer: https://aai.egi.eu/auth/realms/egi
+    redirect_uri: ""      # optional explicit override
+    # audience: ""        # optional: enforce the JWT 'aud' claim
+```
+
+When `client_id` is not configured, the login page hides the "EGI Check-in"
+button and this route redirects back to `GET /login` with an error.
+
+**Auth:** Public
+**Response:** Redirect to the Check-in authorization endpoint
+
+---
+
+### `GET /oauth/callback`
+
+Callback for the OAuth authorization-code flow. Verifies the `state`
+parameter (CSRF protection) and the `iss` parameter (RFC 9207, when
+present), then exchanges the `code` and the PKCE `code_verifier` for
+tokens at the IdP token endpoint, and establishes the session exactly like
+`POST /login` (validation, group check, namespace derivation, userspace
+ensure, config seeding).
+
+**Auth:** Public
+**Success:** Redirect to `next` (or `/`)
+**Failure:** Flash error message, redirect to `GET /login`
+
+---
+
+### `GET /logout`
+
+Clear the session and redirect to the login page.
+
+**Query parameters:**
+
+| Parameter | Description |
+|---|---|
+| `reason=expired` | Show "token expired" flash message |
+
+**Response:** Redirect to `/login`
+
+---
+
+## Job Routes (`app/k8s.py`)
+
+### `GET /`
+
+Render the "Home" page: an overview of the user's **jobs** (from
+`GET /api/jobs`) and their deployed **interlink/HPC nodes** (from the
+configured HPC nodes and each node's InterLink release status).
+
+**Auth:** Required
+**Response:** `home.html`
+
+---
+
+### `GET /submit`
+
+Render the "Submit a Job" form.
+
+The form's InterLink-node dropdown is populated by calling
+`GET /api/interlink/nodes`. Saved container configs for the user are listed for
+one-click reuse.
+
+**Auth:** Required
+**Response:** `index.html`
+
+---
+
+### `POST /submit`
+
+Submit a new job (forwards to `POST /api/jobs/preset`).
+
+**Auth:** Required
+
+**Form fields:**
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | ✓ | Job name (RFC 1123 label, max 63 chars) |
+| `image` | ✓ | Container image (placeholder shows the configured `site.default_image`) |
+| `node_name` | ✓ | InterLink virtual-kubelet node name (from the dropdown) |
+| `cpu` | | CPU request/limit, e.g. `2`, `500m` (default `1`) |
+| `memory` | | Memory request/limit, e.g. `4Gi`, `512Mi` (default `1Gi`) |
+| `command` | | Shell command override; runs as `/bin/sh -c "<command>"` |
+| `env_key[]` | | Environment variable key (repeatable) |
+| `env_value[]` | | Environment variable value (repeatable, paired with `env_key`) |
+
+**Success:** Render `status.html` with the job result
+**Failure:** Flash error, redirect to `GET /submit`
+
+---
+
+### `GET /jobs`
+
+List all container jobs in the user's namespace (from `GET /api/jobs`).
+InterLink nodes/releases are managed on the "Manage Nodes" page
+(`GET /hpc/nodes`), not shown here.
+
+**Auth:** Required
+**Response:** `deployments.html` with `workloads` list
+
+Each workload entry:
+
+```python
+{
+    "kind":         "container",
+    "name":         str,
+    "namespace":    str,
+    "detail":       str,   # container image
+    "node_name":    str,
+    "status":       str,   # CSS badge class key
+    "created":      str,   # ISO timestamp
+}
+```
+
+---
+
+### `POST /jobs/<namespace>/<name>/delete`
+
+Delete a container job (forwards to `DELETE /api/jobs/<name>`).
+
+**Auth:** Required
+**Security:** `namespace` must equal `session["namespace"]`
+**Response:** Redirect to `/jobs`
+
+---
+
+### `GET /jobs/<namespace>/<name>/status`
+
+Get current job status as JSON (used by the `status.html` polling page after a
+submit).
+
+**Auth:** Required
+**Security:** `namespace` must equal `session["namespace"]`
+**Response:** JSON
+
+```json
+{
+  "status": "succeeded | failed | suspended | running | unknown",
+  "ready": 0,
+  "active": 0,
+  "succeeded": 1,
+  "failed": 0
+}
+```
+
+---
+
+### `POST /jobs/<namespace>/<name>/save`
+
+Read the full job spec (forwards to `GET /api/jobs/<name>`) and save it to the
+user's saved-config store as a reusable container template.
+
+**Auth:** Required
+**Security:** `namespace` must equal `session["namespace"]`
+**Response:** Redirect to `/jobs`
+
+---
+
+## Node Management Routes (`app/hpc.py`)
+
+All node-management routes are mounted under the `/hpc` prefix. They render
+forms or result pages; the backend proxies to `/api/hpc/*` and `/api/interlink`
+using the user's session token.
+
+### `GET /hpc/nodes`
+
+Render the "Manage Nodes" page — the single place to manage HPC nodes and
+their InterLink virtual-kubelet deployments. For every configured HPC node
+(from `server/hpc/*.yaml`) the page shows connection details, HPC-side
+actions (deploy/status/start/stop) and the InterLink release state
+(`interlink-<hpc_name>`, checked via `GET /api/interlink?hpc_name=<name>`).
+
+**Auth:** Required
+**Response:** `nodes.html`
+
+---
+
+### `GET /hpc`
+
+Deprecated: redirects to `GET /hpc/nodes`.
+
+---
+
+### `POST /hpc/nodes/interlink/deploy`
+
+Deploy the InterLink virtual-kubelet bound to the selected HPC node
+(forwards to `POST /api/interlink` with `{"hpc_name": ...}`).
+
+**Auth:** Required
+**Form fields:** `hpc_name` (required)
+**Response:** Redirect to `/hpc/nodes`
+
+---
+
+### `POST /hpc/nodes/interlink/delete`
+
+Uninstall the InterLink release bound to the selected HPC node (forwards to
+`DELETE /api/interlink` with `{"hpc_name": ...}`).
+
+**Auth:** Required
+**Form fields:** `hpc_name` (required)
+**Response:** Redirect to `/hpc/nodes`
+
+---
+
+### `POST /hpc/nodes/start`
+
+Start a node in one action: deploy the HPC Pilot stack (wstunnel +
+supervisord) on the remote node, then install the InterLink virtual-kubelet
+bound to it. Both steps run synchronously; their combined output is shown as
+logs on the result page (`node_result.html`).
+
+**Auth:** Required
+**Form fields:** `hpc_name` (required)
+**Response:** `node_result.html` with success/failure and logs
+
+---
+
+### `POST /hpc/nodes/stop`
+
+Stop a node in one action: stop all HPC-side services (supervisorctl stop
+all), then uninstall the InterLink virtual-kubelet release bound to it. Both
+steps run synchronously; their combined output is shown as logs on the result
+page (`node_result.html`).
+
+**Auth:** Required
+**Form fields:** `hpc_name` (required)
+**Response:** `node_result.html` with success/failure and logs
+
+---
+
+### `POST /hpc/nodes/prune`
+
+Prune the user's userspace (forwards to `POST /api/userspace/prune`):
+uninstall every InterLink release, undeploy every HPC edge stack and delete
+the user's Kubernetes namespace. Triggered by the "Prune everything" button
+on the Manage Nodes page (with a confirmation dialog).
+
+**Auth:** Required
+**Response:** Redirect to `/hpc/nodes`
+
+---
+
+### `POST /hpc/deploy`
+
+Deploy the HPC Pilot stack on the selected node (forwards to
+`POST /api/hpc/deploy` with `{"hpc_name": ...}`).
+
+**Auth:** Required
+**Query parameters:** `hpc_name` (required)
+**Response:** `hpc_result.html` with the deploy outcome
+
+---
+
+### `GET /hpc/status`
+
+Query `supervisorctl status` on the selected node (forwards to
+`GET /api/hpc/status` with `?hpc_name=`).
+
+**Auth:** Required
+**Form fields:** `hpc_name` (required)
+**Response:** `hpc_result.html`
+
+---
+
+### `POST /hpc/start`
+
+Start all managed services on the selected node (forwards to
+`POST /api/hpc/start`).
+
+**Auth:** Required
+**Form fields:** `hpc_name` (required)
+**Response:** `hpc_result.html`
+
+---
+
+### `POST /hpc/stop`
+
+Stop all managed services on the selected node (forwards to
+`POST /api/hpc/stop`).
+
+**Auth:** Required
+**Form fields:** `hpc_name` (required)
+**Response:** `hpc_result.html`
+
+---
+
+## Saved Config Routes (`app/saved.py`)
+
+### `POST /saved/<config_id>/delete`
+
+Remove a saved configuration entry from the user's store.
+
+**Auth:** Required
+**Response:** Redirect to `/`
+
+---
+
+## Static Assets & API Docs
+
+- All CSS lives in `app/static/style.css`.
+- Templates live in `app/templates/` (all extend `base.html`).
+- `base.html` embeds the token-expiry countdown JavaScript that redirects to
+  `/logout?reason=expired` when the session token expires.
+- The interactive Swagger UI for the REST API is served at **`/api/docs`**.
+

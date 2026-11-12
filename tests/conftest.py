@@ -10,8 +10,11 @@ successful API login).
 
 import hashlib
 import time
+from typing import Optional
+from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 # ---------------------------------------------------------------------------
 # Flask application fixture
@@ -77,3 +80,31 @@ def auth_headers(app, client):
     """
     namespace = login_client(client)
     yield {"Authorization": "Bearer fake-test-token"}, namespace
+
+
+# ---------------------------------------------------------------------------
+# HTTP-error helper
+# ---------------------------------------------------------------------------
+
+
+def http_error(status_code: int, message: Optional[str] = None) -> requests.HTTPError:
+    """
+    Build a minimal ``requests.HTTPError`` carrying the given status code
+    and a JSON ``{"error": ...}`` body.
+
+    Shared by every GUI test file: it lets tests fake API error responses
+    without any network access.  ``message`` defaults to ``"HTTP <code>"``.
+
+    Args:
+        status_code: The HTTP status the faked response carries.
+        message: Optional body for the response's ``error`` field.
+
+    Returns:
+        A ``requests.HTTPError`` whose ``response.status_code``,
+        ``response.text`` and ``response.json()`` behave as specified.
+    """
+    response = MagicMock()
+    response.status_code = status_code
+    response.text = message or f"HTTP {status_code}"
+    response.json.return_value = {"error": message or f"HTTP {status_code}"}
+    return requests.HTTPError(response=response)

@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - saved configurations — `GET/POST /api/saved`, `GET/DELETE /api/saved/{id}`.
 - The OIDC client secret no longer reaches the GUI — the code→token
   exchange happens inside the API.
+- **Docs**: the Web UI routes reference moved to the pilot-app repository
+  (`docs/web_ui.md` there); `docs/rest_api.md` now documents the public
+  endpoints (`GET /api/site`, `POST /api/auth/verify`,
+  `POST /api/auth/oidc/exchange`) and the saved-config CRUD.
 
 ## [v0.4.1] - 2026-10-13
 

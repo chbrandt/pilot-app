@@ -25,7 +25,8 @@ API's ``require_token`` decorator is satisfied transparently.
 Errors
 ------
 ``requests.HTTPError`` is raised for 4xx/5xx responses.  Route handlers in
-``app/`` should catch it and translate to flash messages as appropriate.
+``app/`` should catch it and translate it to flash messages with the
+shared :func:`api_error` helper defined in this module.
 """
 
 import logging
@@ -55,6 +56,27 @@ LONG_TIMEOUT = 300
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
+
+
+def api_error(exc: requests.HTTPError) -> str:
+    """
+    Extract a human-readable error message from a ``requests.HTTPError``.
+
+    GUI route handlers use this to translate API error responses into flash
+    messages; the single shared implementation lives here, next to the
+    client that raises the error.
+
+    Args:
+        exc: The raised ``requests.HTTPError``.  Its ``response`` usually
+            carries a JSON body with an ``error`` key, but may be anything.
+
+    Returns:
+        The API's ``error`` field when present, otherwise ``str(exc)``.
+    """
+    try:
+        return exc.response.json().get("error", str(exc))
+    except Exception:
+        return str(exc)
 
 
 def _headers() -> dict:

@@ -12,9 +12,9 @@ Patches:
 No real mccli, SSH, HPC nodes or HTTP access is required.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import requests
+from tests.conftest import FAKE_NAMESPACE, FAKE_SUB, http_error, login_client
 
 
 # ---------------------------------------------------------------------------
@@ -26,9 +26,8 @@ API_GET_PATCH = "app.hpc.api_get"
 API_POST_PATCH = "app.hpc.api_post"
 API_DELETE_PATCH = "app.hpc.api_delete"
 
-FAKE_NAMESPACE = "user-testhpcnamespace1234"
 FAKE_USER = {
-    "sub": "test-sub",
+    "sub": FAKE_SUB,
     "namespace": FAKE_NAMESPACE,
     "exp": 9999999999,
     "iss": "https://aai.egi.eu",
@@ -48,23 +47,7 @@ _SUCCESS = {"success": True, "output": "ok", "error": ""}
 _FAILURE = {"success": False, "output": "", "error": "connection refused"}
 
 
-def _logged_in_client(client):
-    """Inject a fake session so require_login passes."""
-    with client.session_transaction() as sess:
-        sess["namespace"] = FAKE_NAMESPACE
-        sess["token"] = "fake-token"
-        sess["claims"] = {"sub": "test-sub", "exp": 9999999999}
-    return client
-
-
-def _http_error(status_code: int) -> requests.HTTPError:
-    response = MagicMock()
-    response.status_code = status_code
-    response.json.return_value = {"error": f"HTTP {status_code}"}
-    return requests.HTTPError(response=response)
-
-
-def make_api_get(site=SITE_META, nodes=FAKE_HPC_NODES, interlink=_http_error(404)):
+def make_api_get(site=SITE_META, nodes=FAKE_HPC_NODES, interlink=http_error(404)):
     """
     Build a path-keyed ``app.hpc.api_get`` fake.
 
@@ -99,7 +82,7 @@ class TestHpcPage:
         assert "/login" in resp.headers["Location"]
 
     def test_redirects_to_manage_nodes_when_logged_in(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.get(self.URL, follow_redirects=False)
         assert resp.status_code == 302
@@ -121,7 +104,7 @@ class TestManageNodesPage:
 
     def test_hpc_nodes_rendered(self, client):
         """Every configured HPC node must be present in the page."""
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=make_api_get()),
@@ -132,7 +115,7 @@ class TestManageNodesPage:
         assert b"test-docker" in resp.data
 
     def test_interlink_deployed_shows_stop_button(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=make_api_get(interlink={"success": True})),
@@ -142,7 +125,7 @@ class TestManageNodesPage:
         assert "Stop Node" in resp.data.decode()
 
     def test_interlink_not_deployed_shows_start_button(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=make_api_get()),
@@ -153,7 +136,7 @@ class TestManageNodesPage:
 
     def test_wstunnel_defaults_rendered_from_site_meta(self, client):
         """The page shows the shared wstunnel hostname/port (GET /api/site)."""
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=make_api_get()),
@@ -177,13 +160,13 @@ class TestInterlinkDeploy:
         assert "/login" in resp.headers["Location"]
 
     def test_missing_hpc_name_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.post(self.URL, data={}, follow_redirects=False)
         assert resp.status_code == 302
 
     def test_success_redirects_to_manage_nodes(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_POST_PATCH, return_value=_SUCCESS),
@@ -195,7 +178,7 @@ class TestInterlinkDeploy:
         assert resp.headers["Location"].endswith("/nodes")
 
     def test_api_failure_still_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_POST_PATCH, return_value=_FAILURE),
@@ -215,13 +198,13 @@ class TestInterlinkDelete:
         assert "/login" in resp.headers["Location"]
 
     def test_missing_hpc_name_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.post(self.URL, data={}, follow_redirects=False)
         assert resp.status_code == 302
 
     def test_success_redirects_to_manage_nodes(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_DELETE_PATCH, return_value=_SUCCESS),
@@ -233,7 +216,7 @@ class TestInterlinkDelete:
         assert resp.headers["Location"].endswith("/nodes")
 
     def test_api_failure_still_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_DELETE_PATCH, return_value=_FAILURE),
@@ -259,13 +242,13 @@ class TestNodeStart:
         assert "/login" in resp.headers["Location"]
 
     def test_missing_hpc_name_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.post(self.URL, data={}, follow_redirects=False)
         assert resp.status_code == 302
 
     def test_success_renders_result_with_logs(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_POST_PATCH, return_value=_SUCCESS),
@@ -278,7 +261,7 @@ class TestNodeStart:
         assert "OK" in html  # log content
 
     def test_hpc_failure_renders_result_with_error(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_POST_PATCH, return_value=_FAILURE),
@@ -298,13 +281,13 @@ class TestNodeStop:
         assert "/login" in resp.headers["Location"]
 
     def test_missing_hpc_name_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.post(self.URL, data={}, follow_redirects=False)
         assert resp.status_code == 302
 
     def test_success_renders_result_with_logs(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_POST_PATCH, return_value=_SUCCESS),
@@ -318,11 +301,11 @@ class TestNodeStop:
 
     def test_interlink_not_deployed_is_tolerated(self, client):
         """A 404 on the InterLink uninstall is a warning, not a failure."""
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_POST_PATCH, return_value=_SUCCESS),
-            patch(API_DELETE_PATCH, side_effect=_http_error(404)),
+            patch(API_DELETE_PATCH, side_effect=http_error(404)),
         ):
             resp = client.post(self.URL, data={"hpc_name": "test-echo"})
         assert resp.status_code == 200
@@ -343,14 +326,14 @@ class TestHpcDeploy:
         assert "/login" in resp.headers["Location"]
 
     def test_missing_hpc_name_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.post(self.URL, follow_redirects=False)
         assert resp.status_code == 302
 
     def test_success_renders_result_with_wstunnel_details(self, client):
         """The result page shows the shared wstunnel host from GET /api/site."""
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=make_api_get()),
@@ -365,7 +348,7 @@ class TestHpcDeploy:
         """HPC deploy is long-running; the API call must use LONG_TIMEOUT."""
         from app.api_client import LONG_TIMEOUT
 
-        _logged_in_client(client)
+        login_client(client)
         captured = {}
 
         def fake_api_post(path, payload=None, timeout=None):
@@ -400,13 +383,13 @@ class TestHpcStatus:
         assert "/login" in resp.headers["Location"]
 
     def test_missing_hpc_name_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.get(self.URL, follow_redirects=False)
         assert resp.status_code == 302
 
     def test_success_renders_result(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, return_value=_SUCCESS),
@@ -415,7 +398,7 @@ class TestHpcStatus:
         assert resp.status_code == 200
 
     def test_failure_renders_result(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, return_value=_FAILURE),
@@ -439,7 +422,7 @@ class TestHpcStartStop:
         assert resp.status_code == 302
 
     def test_start_success_renders_result(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_POST_PATCH, return_value=_SUCCESS),
@@ -448,7 +431,7 @@ class TestHpcStartStop:
         assert resp.status_code == 200
 
     def test_stop_success_renders_result(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_POST_PATCH, return_value=_SUCCESS),
@@ -471,7 +454,7 @@ class TestUserspacePrune:
         assert "/login" in resp.headers["Location"]
 
     def test_success_redirects_to_manage_nodes(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(
@@ -484,10 +467,10 @@ class TestUserspacePrune:
         assert resp.headers["Location"].endswith("/nodes")
 
     def test_api_failure_still_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
-            patch(API_POST_PATCH, side_effect=_http_error(500)),
+            patch(API_POST_PATCH, side_effect=http_error(500)),
         ):
             resp = client.post(self.URL, follow_redirects=False)
         assert resp.status_code == 302

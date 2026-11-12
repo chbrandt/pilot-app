@@ -25,7 +25,7 @@ from urllib.parse import urlencode
 import requests
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
-from app.api_client import api_get, api_post
+from app.api_client import api_error, api_get, api_post
 
 logger = logging.getLogger(__name__)
 
@@ -93,14 +93,6 @@ def require_login(f):
 # ── Routes ────────────────────────────────────────────────────────────
 
 
-def _api_error(exc: requests.HTTPError) -> str:
-    """Extract a human-readable message from an HTTPError response."""
-    try:
-        return exc.response.json().get("error", str(exc))
-    except Exception:
-        return str(exc)
-
-
 def _oidc_config() -> dict:
     """
     Return the OIDC client configuration as published by the API's public
@@ -128,7 +120,7 @@ def _establish_session(token: str, next_url: str):
     try:
         result = api_post("/api/auth/verify", {"access_token": token})
     except requests.HTTPError as exc:
-        flash(f"Login failed: {_api_error(exc)}", "error")
+        flash(f"Login failed: {api_error(exc)}", "error")
         return None
     except Exception as exc:
         logger.error("Login verification failed: %s", exc)
@@ -356,8 +348,8 @@ def egi_callback():
             },
         )
     except requests.HTTPError as exc:
-        logger.error("OAuth exchange failed: %s", _api_error(exc))
-        flash(f"Login failed: {_api_error(exc)}", "error")
+        logger.error("OAuth exchange failed: %s", api_error(exc))
+        flash(f"Login failed: {api_error(exc)}", "error")
         return redirect(url_for("auth.login"))
     except Exception as exc:
         logger.error("OAuth exchange failed: %s", exc)

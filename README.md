@@ -87,6 +87,13 @@ client, HPC node list) is discovered at runtime from the API's public
 | **pilot-app** (this repo) | Web GUI — a pure HTTP client of the API |
 | [pilot-deploy](https://github.com/chbrandt/pilot-deploy) | Helm charts + docker/deployment recipes |
 
+## Documentation
+
+- [`docs/web_ui.md`](docs/web_ui.md) — every browser route (login, Home,
+  Submit Job, Jobs, Manage Nodes, saved configs) with its parameters and
+  session requirements.
+- [pilot-api REST API reference](https://github.com/chbrandt/pilot-api/blob/main/docs/rest_api.md) — what `app/api_client.py` calls under the hood.
+
 ## Continuous Integration
 
 - `release.yml` — publishes `ghcr.io/chbrandt/pilot-app` from version tags

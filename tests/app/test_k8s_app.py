@@ -17,9 +17,9 @@ Patches:
 No real Kubernetes cluster, Helm binary, or HTTP access is required.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import requests
+from tests.conftest import FAKE_NAMESPACE, FAKE_SUB, http_error, login_client
 
 
 # ---------------------------------------------------------------------------
@@ -31,9 +31,8 @@ API_GET_PATCH = "app.k8s.api_get"
 API_POST_PATCH = "app.k8s.api_post"
 API_DELETE_PATCH = "app.k8s.api_delete"
 
-FAKE_NAMESPACE = "user-testnamespace1234"
 FAKE_USER = {
-    "sub": "test-sub",
+    "sub": FAKE_SUB,
     "namespace": FAKE_NAMESPACE,
     "exp": 9999999999,
     "iss": "https://aai.egi.eu",
@@ -47,22 +46,6 @@ SITE_META = {
 FAKE_HPC_NODES = [
     {"name": "test-echo", "hostname": "1.2.3.4", "ssh_port": 22, "plugin": "echo"},
 ]
-
-
-def _logged_in_client(client):
-    """Inject a fake session so require_login passes."""
-    with client.session_transaction() as sess:
-        sess["namespace"] = FAKE_NAMESPACE
-        sess["token"] = "fake-token"
-        sess["claims"] = {"sub": "test-sub", "exp": 9999999999}
-    return client
-
-
-def _http_error(status_code: int, message: str = None) -> requests.HTTPError:
-    response = MagicMock()
-    response.status_code = status_code
-    response.json.return_value = {"error": message or f"HTTP {status_code}"}
-    return requests.HTTPError(response=response)
 
 
 def _job(name="my-job", image="ubuntu:22.04", node_name="vk-1", status="running"):
@@ -80,7 +63,7 @@ def _job(name="my-job", image="ubuntu:22.04", node_name="vk-1", status="running"
 def make_api_get(
     jobs=None,
     nodes=FAKE_HPC_NODES,
-    interlink=_http_error(404),
+    interlink=http_error(404),
     interlink_nodes=None,
     saved=None,
     site=SITE_META,
@@ -139,7 +122,7 @@ class TestHomePage:
     def test_renders_jobs_and_nodes(self, client):
         """The home page lists both jobs and interlink/HPC nodes."""
         jobs = [_job(name="alpha"), _job(name="beta")]
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=make_api_get(jobs=jobs)),
@@ -154,12 +137,12 @@ class TestHomePage:
 
     def test_node_list_failure_renders_error(self, client):
         """When /api/hpc/nodes fails the page still renders, with the error."""
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(
                 API_GET_PATCH,
-                side_effect=make_api_get(jobs=[], interlink=_http_error(500)),
+                side_effect=make_api_get(jobs=[], interlink=http_error(500)),
             ),
         ):
             resp = client.get(self.URL)
@@ -190,7 +173,7 @@ class TestSubmitForm:
             "image": "ubuntu:22.04",
             "saved_at": "2025-01-01T00:00:00+00:00",
         }]
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(
@@ -215,10 +198,10 @@ class TestSubmitForm:
         """/api/saved failures still render the form (no saved presets)."""
         def fake(path, timeout=None, params=None):
             if path == "/api/saved":
-                raise _http_error(500)
+                raise http_error(500)
             return make_api_get()(path, timeout=timeout, params=params)
 
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=fake),
@@ -253,19 +236,19 @@ class TestSubmitJob:
         assert "/login" in resp.headers["Location"]
 
     def test_missing_name_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.post(self.URL, data={"image": "x", "node_name": "y"})
         assert resp.status_code == 302
 
     def test_invalid_name_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.post(self.URL, data={**self._valid_data(), "name": "Bad_Name"})
         assert resp.status_code == 302
 
     def test_success_renders_status_page(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(
@@ -277,7 +260,7 @@ class TestSubmitJob:
         assert resp.status_code == 200
 
     def test_sends_preset_payload_to_api(self, client):
-        _logged_in_client(client)
+        login_client(client)
         captured = {}
 
         def fake(path, body=None, timeout=None):
@@ -300,10 +283,10 @@ class TestSubmitJob:
         assert body["memory"] == "1Gi"
 
     def test_api_failure_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
-            patch(API_POST_PATCH, side_effect=_http_error(400, "Invalid node")),
+            patch(API_POST_PATCH, side_effect=http_error(400, "Invalid node")),
         ):
             resp = client.post(self.URL, data=self._valid_data(), follow_redirects=False)
         assert resp.status_code == 302
@@ -323,7 +306,7 @@ class TestJobsPage:
         assert "/login" in resp.headers["Location"]
 
     def test_no_jobs_renders_empty_state_without_error(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=make_api_get(jobs=[])),
@@ -338,7 +321,7 @@ class TestJobsPage:
     def test_jobs_listed_without_error(self, client):
         """Jobs are listed; interlink nodes/releases are NOT shown as jobs."""
         jobs = [_job(name="alpha"), _job(name="beta")]
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=make_api_get(jobs=jobs)),
@@ -368,14 +351,14 @@ class TestDeleteJob:
 
     def test_wrong_namespace_redirects(self, client):
         """Cross-user namespace attempts must redirect to /jobs."""
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.post("/jobs/other-ns/my-job/delete", follow_redirects=False)
         assert resp.status_code == 302
         assert "/jobs" in resp.headers["Location"]
 
     def test_success_redirects_to_jobs(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_DELETE_PATCH, return_value={"deleted": True}),
@@ -385,10 +368,10 @@ class TestDeleteJob:
         assert "/jobs" in resp.headers["Location"]
 
     def test_api_failure_still_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
-            patch(API_DELETE_PATCH, side_effect=_http_error(404)),
+            patch(API_DELETE_PATCH, side_effect=http_error(404)),
         ):
             resp = client.post(self._url(), follow_redirects=False)
         assert resp.status_code == 302
@@ -401,7 +384,7 @@ class TestDeleteJob:
 
 class TestJobStatus:
     def test_json_passthrough(self, client):
-        _logged_in_client(client)
+        login_client(client)
         payload = {"status": "running", "replicas": 1}
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
@@ -414,10 +397,10 @@ class TestJobStatus:
         assert resp.get_json(force=True) == payload
 
     def test_api_error_maps_to_status_code(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
-            patch(API_GET_PATCH, side_effect=_http_error(404)),
+            patch(API_GET_PATCH, side_effect=http_error(404)),
         ):
             resp = client.get(f"/jobs/{FAKE_NAMESPACE}/my-job/status")
 
@@ -440,7 +423,7 @@ class TestSaveJob:
         assert "/login" in resp.headers["Location"]
 
     def test_wrong_namespace_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.post("/jobs/other-ns/my-job/save", follow_redirects=False)
         assert resp.status_code == 302
@@ -448,7 +431,7 @@ class TestSaveJob:
 
     def test_success_posts_saved_config_to_api(self, client):
         """The job spec read from /api/jobs/<name> is saved via POST /api/saved."""
-        _logged_in_client(client)
+        login_client(client)
         captured = {}
 
         def fake(path, body=None, timeout=None):
@@ -471,10 +454,10 @@ class TestSaveJob:
         }
 
     def test_api_failure_redirects(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
-            patch(API_GET_PATCH, side_effect=_http_error(404)),
+            patch(API_GET_PATCH, side_effect=http_error(404)),
         ):
             resp = client.post(self._url(), follow_redirects=False)
         assert resp.status_code == 302
@@ -493,14 +476,14 @@ class TestJobOutputPage:
 
     def test_wrong_namespace_redirects(self, client):
         """Cross-user namespace attempts must redirect to /jobs."""
-        _logged_in_client(client)
+        login_client(client)
         with patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER):
             resp = client.get("/jobs/other-namespace/my-job/output")
         assert resp.status_code == 302
         assert "/jobs" in resp.headers["Location"]
 
     def test_renders_output_content(self, client):
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=make_api_get()),
@@ -517,10 +500,10 @@ class TestJobOutputPage:
         """An API failure (e.g. 404) renders an error card, not a crash."""
         def fake(path, timeout=None, params=None):
             if path.endswith("/output"):
-                raise _http_error(404)
+                raise http_error(404)
             return make_api_get()(path, timeout=timeout, params=params)
 
-        _logged_in_client(client)
+        login_client(client)
         with (
             patch(GET_SESSION_USER_PATCH, return_value=FAKE_USER),
             patch(API_GET_PATCH, side_effect=fake),

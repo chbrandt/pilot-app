@@ -25,7 +25,7 @@ import requests
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
 from app.auth import require_login
-from app.api_client import LONG_TIMEOUT, api_delete, api_get, api_post
+from app.api_client import LONG_TIMEOUT, api_delete, api_error, api_get, api_post
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +33,6 @@ hpc_bp = Blueprint("app_hpc", __name__, url_prefix="/hpc")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
-
-
-def _api_error(exc: requests.HTTPError) -> str:
-    """Extract a human-readable message from an HTTPError response."""
-    try:
-        return exc.response.json().get("error", str(exc))
-    except Exception:
-        return str(exc)
 
 
 def _site_meta() -> dict:
@@ -108,7 +100,7 @@ def manage_nodes():
             entry["interlink_deployed"] = bool(result.get("success"))
         except requests.HTTPError as exc:
             if exc.response is None or exc.response.status_code != 404:
-                msg = _api_error(exc)
+                msg = api_error(exc)
                 errors.append(f"InterLink ({hpc_name}): {msg}")
                 entry["interlink_error"] = msg
         except Exception as exc:
@@ -148,7 +140,7 @@ def interlink_deploy():
         else:
             flash(f"InterLink deployment failed: {result.get('error')}", "error")
     except requests.HTTPError as exc:
-        flash(f"InterLink deployment failed: {_api_error(exc)}", "error")
+        flash(f"InterLink deployment failed: {api_error(exc)}", "error")
     except Exception as exc:
         logger.error("InterLink deploy failed: %s", exc)
         flash(f"InterLink deployment failed: {exc}", "error")
@@ -172,7 +164,7 @@ def interlink_delete():
         else:
             flash(f"Uninstall failed: {result.get('error')}", "error")
     except requests.HTTPError as exc:
-        flash(f"Uninstall failed: {_api_error(exc)}", "error")
+        flash(f"Uninstall failed: {api_error(exc)}", "error")
     except Exception as exc:
         flash(f"Uninstall failed: {exc}", "error")
 
@@ -210,7 +202,7 @@ def node_start():
                 logs.append(hpc_result["output"])
     except requests.HTTPError as exc:
         overall_success = False
-        logs.append(f"[FAIL] HPC deploy: {_api_error(exc)}")
+        logs.append(f"[FAIL] HPC deploy: {api_error(exc)}")
     except Exception as exc:
         overall_success = False
         logs.append(f"[FAIL] HPC deploy: {exc}")
@@ -233,7 +225,7 @@ def node_start():
                     logs.append(il_result["output"])
         except requests.HTTPError as exc:
             overall_success = False
-            logs.append(f"[FAIL] InterLink: {_api_error(exc)}")
+            logs.append(f"[FAIL] InterLink: {api_error(exc)}")
         except Exception as exc:
             overall_success = False
             logs.append(f"[FAIL] InterLink: {exc}")
@@ -276,7 +268,7 @@ def node_stop():
             logs.append(f"[FAIL] HPC stop: {hpc_result.get('error', 'unknown')}")
     except requests.HTTPError as exc:
         overall_success = False
-        logs.append(f"[FAIL] HPC stop: {_api_error(exc)}")
+        logs.append(f"[FAIL] HPC stop: {api_error(exc)}")
     except Exception as exc:
         overall_success = False
         logs.append(f"[FAIL] HPC stop: {exc}")
@@ -296,7 +288,7 @@ def node_stop():
             logs.append("[WARN] InterLink was not deployed — skipping.")
         else:
             overall_success = False
-            logs.append(f"[FAIL] InterLink uninstall: {_api_error(exc)}")
+            logs.append(f"[FAIL] InterLink uninstall: {api_error(exc)}")
     except Exception as exc:
         overall_success = False
         logs.append(f"[FAIL] InterLink uninstall: {exc}")
@@ -332,7 +324,7 @@ def userspace_prune():
                 "success",
             )
     except requests.HTTPError as exc:
-        flash(f"Prune failed: {_api_error(exc)}", "error")
+        flash(f"Prune failed: {api_error(exc)}", "error")
     except Exception as exc:
         logger.error("Prune failed: %s", exc)
         flash(f"Prune failed: {exc}", "error")
@@ -372,7 +364,7 @@ def hpc_deploy():
             timeout=LONG_TIMEOUT,
         )
     except requests.HTTPError as exc:
-        result = {"success": False, "error": _api_error(exc)}
+        result = {"success": False, "error": api_error(exc)}
     except Exception as exc:
         result = {"success": False, "error": str(exc)}
 
@@ -399,7 +391,7 @@ def hpc_status():
     try:
         result = api_get("/api/hpc/status", params={"hpc_name": hpc_name})
     except requests.HTTPError as exc:
-        result = {"success": False, "error": _api_error(exc)}
+        result = {"success": False, "error": api_error(exc)}
     except Exception as exc:
         result = {"success": False, "error": str(exc)}
 
@@ -421,7 +413,7 @@ def hpc_start():
     try:
         result = api_post("/api/hpc/start", {"hpc_name": hpc_name})
     except requests.HTTPError as exc:
-        result = {"success": False, "error": _api_error(exc)}
+        result = {"success": False, "error": api_error(exc)}
     except Exception as exc:
         result = {"success": False, "error": str(exc)}
 
@@ -443,7 +435,7 @@ def hpc_stop():
     try:
         result = api_post("/api/hpc/stop", {"hpc_name": hpc_name})
     except requests.HTTPError as exc:
-        result = {"success": False, "error": _api_error(exc)}
+        result = {"success": False, "error": api_error(exc)}
     except Exception as exc:
         result = {"success": False, "error": str(exc)}
 

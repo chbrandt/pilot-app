@@ -14,11 +14,11 @@ network access is required.
 
 import base64
 import hashlib
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import requests
 
-from tests.conftest import FAKE_NAMESPACE, FAKE_SUB, make_fake_claims
+from tests.conftest import FAKE_NAMESPACE, FAKE_SUB, http_error, make_fake_claims
 
 SITE_PATCH = "app.auth.api_get"      # app.auth's imported copy of api_get
 API_POST_PATCH = "app.auth.api_post"  # app.auth's imported copy of api_post
@@ -81,13 +81,6 @@ def make_login_api_post(
     return fake, calls
 
 
-def _http_error(status_code: int, message: str = "boom") -> requests.HTTPError:
-    response = MagicMock()
-    response.status_code = status_code
-    response.json.return_value = {"error": message}
-    return requests.HTTPError(response=response)
-
-
 # ---------------------------------------------------------------------------
 # POST /login  (token-paste login)
 # ---------------------------------------------------------------------------
@@ -122,7 +115,7 @@ class TestTokenPasteLogin:
 
     def test_invalid_token_flashes_and_redirects(self, client):
         fake, _ = make_login_api_post(
-            verify_error=_http_error(401, "Token validation failed: bad signature")
+            verify_error=http_error(401, "Token validation failed: bad signature")
         )
         with patch(API_POST_PATCH, side_effect=fake):
             resp = client.post(
@@ -315,7 +308,7 @@ class TestEgiCallback:
 
     def test_exchange_failure_redirects_to_login(self, client):
         self._seed_session(client)
-        fake, _ = make_login_api_post(exchange_error=_http_error(401, "invalid_grant"))
+        fake, _ = make_login_api_post(exchange_error=http_error(401, "invalid_grant"))
         with (
             patch(SITE_PATCH, return_value=SITE_WITH_OIDC),
             patch(API_POST_PATCH, side_effect=fake),

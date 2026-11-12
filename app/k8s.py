@@ -24,7 +24,7 @@ import requests
 from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
 from app.auth import require_login
-from app.api_client import api_delete, api_get, api_post
+from app.api_client import api_delete, api_error, api_get, api_post
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +38,6 @@ def _validate_k8s_name(name: str) -> bool:
     """Validate a Kubernetes resource name (RFC 1123 subdomain)."""
     pattern = r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$"
     return bool(re.match(pattern, name))
-
-
-def _api_error(exc: requests.HTTPError) -> str:
-    """Extract a human-readable message from an HTTPError response."""
-    try:
-        return exc.response.json().get("error", str(exc))
-    except Exception:
-        return str(exc)
 
 
 # ── Routes ────────────────────────────────────────────────────────────
@@ -70,7 +62,7 @@ def home():
     try:
         jobs = api_get("/api/jobs")
     except Exception as exc:
-        errors.append(f"Jobs: {_api_error(exc) if isinstance(exc, requests.HTTPError) else exc}")
+        errors.append(f"Jobs: {api_error(exc) if isinstance(exc, requests.HTTPError) else exc}")
         logger.error("Could not list jobs for home page: %s", exc)
 
     # ── InterLink / HPC nodes ─────────────────────────────────────────
@@ -91,7 +83,7 @@ def home():
         except requests.HTTPError as exc:
             # 404 = not deployed (normal state); surface other errors
             if exc.response is None or exc.response.status_code != 404:
-                errors.append(f"InterLink ({hpc_name}): {_api_error(exc)}")
+                errors.append(f"InterLink ({hpc_name}): {api_error(exc)}")
         except Exception as exc:
             errors.append(f"InterLink ({hpc_name}): {exc}")
         nodes.append(entry)
@@ -205,7 +197,7 @@ def submit_job():
         return render_template("status.html", result=result)
 
     except requests.HTTPError as exc:
-        msg = _api_error(exc)
+        msg = api_error(exc)
         logger.error("Job submission failed: %s", msg)
         flash(f"Job submission failed: {msg}", "error")
         return redirect(url_for("app_k8s.index"))
@@ -262,7 +254,7 @@ def delete_job(namespace, name):
         api_delete(f"/api/jobs/{name}")
         flash(f"Job '{name}' deleted successfully.", "success")
     except requests.HTTPError as exc:
-        msg = _api_error(exc)
+        msg = api_error(exc)
         flash(f"Failed to delete job: {msg}", "error")
     except Exception as exc:
         flash(f"Error: {exc}", "error")
@@ -312,7 +304,7 @@ def save_job(namespace, name):
             "success",
         )
     except requests.HTTPError as exc:
-        msg = _api_error(exc)
+        msg = api_error(exc)
         flash(f"Could not read job spec: {msg}", "error")
     except Exception as exc:
         logger.error("Save job failed: %s", exc)
@@ -341,7 +333,7 @@ def job_output(namespace, name):
         job_name = data.get("name", name)
         pod_name = data.get("pod")
     except requests.HTTPError as exc:
-        error = _api_error(exc)
+        error = api_error(exc)
     except Exception as exc:
         logger.error("job_output failed: %s", exc)
         error = str(exc)
